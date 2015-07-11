@@ -347,7 +347,7 @@ CHECK		= sparse
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void $(CF)
-CFLAGS_MODULE   =
+CFLAGS_MODULE   = -fno-pic
 AFLAGS_MODULE   =
 LDFLAGS_MODULE  =
 CFLAGS_KERNEL	=
@@ -561,7 +561,7 @@ all: vmlinux
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS	+= -Os
 else
-KBUILD_CFLAGS	+= -O2
+KBUILD_CFLAGS	+= -O2 -marm -march=armv7-a -mfpu=neon -ftree-vectorize -funsafe-math-optimizations -fsched-spec-load -mcpu=cortex-a9 -mtune=cortex-a9
 endif
 
 include $(srctree)/arch/$(SRCARCH)/Makefile

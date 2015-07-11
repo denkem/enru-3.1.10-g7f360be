@@ -138,6 +138,8 @@ enum {
 	ATTR_SUSPEND_1_PERCENT,
 };
 
+static int fast_charge = 0;
+
 #if WK_MBAT_IN
 static int is_mbat_in;
 #endif
@@ -516,8 +518,13 @@ static void usb_status_notifier_func(int online)
 		if ( !!(get_kernel_flag() & ALL_AC_CHARGING) ) {
 			BATT_LOG("Debug flag is set to force AC charging, fake as AC");
 			htc_batt_info.rep.charging_source = CHARGER_AC;
-		} else
-			htc_batt_info.rep.charging_source = CHARGER_USB;
+		} else {
+			if(fast_charge){
+				BATT_LOG("fast_charge is set to force AC charging");
+				htc_batt_info.rep.charging_source = CHARGER_AC;
+			} else
+				htc_batt_info.rep.charging_source = CHARGER_USB;
+		}
 		break;
 	case CONNECT_TYPE_AC:
 		BATT_LOG("cable AC");
@@ -880,7 +887,7 @@ static int32_t htc_batt_get_battery_adc(void)
 		retry = 0;
 		memset(&adc, 0, sizeof(struct battery_adc_reply));
 		do {
-			ret = ina230_get_batt_voltage_current(&temp, &temp1);
+		ret = ina230_get_batt_voltage_current(&temp, &temp1);
 			if (!ret)
 				break;
 			mdelay(ADC_I2C_RETRY_DELAY);
@@ -955,30 +962,30 @@ static int32_t htc_batt_get_battery_adc(void)
 		do {
 			i = 0;
 			do {
-				/* Read battery voltage adc data. */
-				ret = tps80032_adc_select_and_read(
-						adc.adc_voltage + i,
-						BATT_VOLT_CHANNEL);
-				if (ret)
+			/* Read battery voltage adc data. */
+			ret = tps80032_adc_select_and_read(
+					adc.adc_voltage + i,
+					BATT_VOLT_CHANNEL);
+			if (ret)
 					break;
 
-				/* Read battery current adc data. */
-				ret = tps80032_adc_select_and_read(
-						adc.adc_current + i,
-						BATT_CURR_CHANNEL);
-				if (ret)
+			/* Read battery current adc data. */
+			ret = tps80032_adc_select_and_read(
+					adc.adc_current + i,
+					BATT_CURR_CHANNEL);
+			if (ret)
 					break;
 
-				/* Read battery vzero clb adc data. */
-				if (htc_batt_info.vzero_clb_channel >= 0) {
-					ret = tps80032_adc_select_and_read(
-							adc.adc_vzero_clb + i,
-							htc_batt_info.vzero_clb_channel);
-					if (ret)
+			/* Read battery vzero clb adc data. */
+			if (htc_batt_info.vzero_clb_channel >= 0) {
+				ret = tps80032_adc_select_and_read(
+						adc.adc_vzero_clb + i,
+						htc_batt_info.vzero_clb_channel);
+				if (ret)
 						break;
-				} else
-					adc.adc_vzero_clb[i] = TPS80032_GPADC_FAKE_VALUE;
-				mdelay(1);
+			} else
+				adc.adc_vzero_clb[i] = TPS80032_GPADC_FAKE_VALUE;
+			mdelay(1);
 			} while (++i < ADC_REPLY_ARRAY_SIZE);
 
 			if (!ret)
@@ -1774,10 +1781,67 @@ static void htc_battery_complete(struct device *dev)
 #endif
 }
 
+static void reevaluate_charger()
+{
+	BATT_LOG("%s", __func__);
+
+	if ( !!(get_kernel_flag() & ALL_AC_CHARGING) ) {
+		BATT_LOG("Debug flag is set to force AC charging, fake as AC");
+		htc_batt_info.rep.charging_source = CHARGER_AC;
+	} else {
+		if(fast_charge){
+			BATT_LOG("fast_charge is set to force AC charging");
+			htc_batt_info.rep.charging_source = CHARGER_AC;
+		} else
+			htc_batt_info.rep.charging_source = CHARGER_USB;
+	}
+
+	if (htc_batt_info.rep.charging_source == CHARGER_USB) {
+		wake_lock(&htc_batt_info.vbus_wake_lock);
+		if (!!(get_kernel_flag() & ALL_AC_CHARGING))
+			tps80032_charger_set_ctrl(POWER_SUPPLY_ENABLE_FAST_CHARGE);
+		else
+			tps80032_charger_set_ctrl(POWER_SUPPLY_ENABLE_SLOW_CHARGE);
+		wake_unlock(&htc_batt_info.vbus_wake_lock);
+	} else if (htc_batt_info.rep.charging_source == CHARGER_AC) {
+		wake_lock(&htc_batt_info.vbus_wake_lock);
+		tps80032_charger_set_ctrl(POWER_SUPPLY_ENABLE_FAST_CHARGE);
+		wake_unlock(&htc_batt_info.vbus_wake_lock);
+	}
+}
+
 static struct dev_pm_ops htc_battery_tps80032_pm_ops = {
 	.prepare = htc_battery_prepare,
 	.complete = htc_battery_complete,
 };
+
+static ssize_t
+fast_charge_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	return sprintf(buf, "%d\n", fast_charge);
+}
+
+static ssize_t
+fast_charge_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t size)
+{
+	int value;
+
+	value = ((int) simple_strtoul(buf, NULL, 10));
+	if(value == 0 || value == 1){
+		if(fast_charge != value){
+			fast_charge = value;
+			BATT_LOG("set fast_charge %d", fast_charge);
+			reevaluate_charger();
+		}
+	}
+	else
+		return -EINVAL;
+
+	return size;
+}
 
 static struct device_attribute tps80032_batt_attrs[] = {
 	__ATTR(reboot_level, S_IRUGO, tps80032_batt_show_attributes, NULL),
@@ -1790,7 +1854,8 @@ static struct device_attribute tps80032_batt_attrs[] = {
 	__ATTR(fake_temp, S_IWUSR, NULL, tps80032_fake_temp_store_attributes),
 	__ATTR(suspend_1_percent, S_IRUGO, tps80032_batt_show_attributes, NULL),
 	__ATTR(eoc_stop, S_IWUSR, NULL, tps80032_notify_eoc_stop_attributes),
-	};
+	__ATTR(fast_charge, S_IRUGO|S_IWUGO, fast_charge_show, fast_charge_store),
+};
 
 static ssize_t tps80032_batt_show_attributes(struct device *dev,
 					struct device_attribute *attr,
